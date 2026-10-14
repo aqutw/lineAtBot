@@ -29,8 +29,11 @@ type Stock struct {
 	Name string `json:"name"`
 }
 type Price struct {
-	Date  string `json:"date"`
-	Close string `json:"close"`
+	Date  string  `json:"date"`
+	Open  *string `json:"open"`
+	High  *string `json:"high"`
+	Low   *string `json:"low"`
+	Close string  `json:"close"`
 }
 type Result struct {
 	Stock      Stock   `json:"stock"`
@@ -73,6 +76,12 @@ func NewStore(ctx context.Context, files fs.FS, databaseURL, source string) (*St
 			source = "使用者匯入行情（非即時報價）"
 		}
 		s := &Store{db: db, postgres: true, Source: source}
+		rows, err := db.QueryContext(ctx, "SELECT open_price, high_price, low_price, close_price FROM prices LIMIT 0")
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("database OHLC schema missing; run migrations/001_postgres.sql and migrations/002_add_ohlc.sql first")
+		}
+		rows.Close()
 		if _, err = s.Stats(ctx); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("database schema missing; import migrations/001_postgres.sql first")
@@ -138,7 +147,17 @@ CREATE TABLE stocks (code TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 CREATE TABLE aliases (alias TEXT PRIMARY KEY, stock_code TEXT NOT NULL REFERENCES stocks(code));
 CREATE TABLE prices (
  stock_code TEXT NOT NULL REFERENCES stocks(code), trading_date TEXT NOT NULL,
- close_price TEXT NOT NULL,
+ open_price TEXT CHECK (CAST(open_price AS REAL) >= 0),
+ high_price TEXT CHECK (CAST(high_price AS REAL) >= 0),
+ low_price TEXT CHECK (CAST(low_price AS REAL) >= 0),
+ close_price TEXT NOT NULL CHECK (CAST(close_price AS REAL) >= 0),
+ CHECK (
+  (high_price IS NULL OR low_price IS NULL OR CAST(high_price AS REAL) >= CAST(low_price AS REAL)) AND
+  (open_price IS NULL OR high_price IS NULL OR CAST(open_price AS REAL) <= CAST(high_price AS REAL)) AND
+  (open_price IS NULL OR low_price IS NULL OR CAST(open_price AS REAL) >= CAST(low_price AS REAL)) AND
+  (high_price IS NULL OR CAST(close_price AS REAL) <= CAST(high_price AS REAL)) AND
+  (low_price IS NULL OR CAST(close_price AS REAL) >= CAST(low_price AS REAL))
+ ),
  PRIMARY KEY (stock_code, trading_date)
 );`)
 	if err != nil {
@@ -173,7 +192,7 @@ CREATE TABLE prices (
 			return err
 		}
 	}
-	prices, err := load("prices.csv", []string{"stock_code", "trading_date", "close_price"})
+	prices, err := load("prices.csv", []string{"stock_code", "trading_date", "open_price", "high_price", "low_price", "close_price"})
 	if err != nil {
 		return err
 	}
@@ -181,10 +200,10 @@ CREATE TABLE prices (
 		if _, err = time.Parse("2006-01-02", row[1]); err != nil {
 			return fmt.Errorf("invalid CSV date")
 		}
-		if _, err = decimal(row[2]); err != nil {
+		if err = validateOHLC(row[2:]); err != nil {
 			return err
 		}
-		if _, err = tx.Exec("INSERT INTO prices VALUES (?, ?, ?)", row[0], row[1], row[2]); err != nil {
+		if _, err = tx.Exec("INSERT INTO prices (stock_code, trading_date, open_price, high_price, low_price, close_price) VALUES (?, ?, ?, ?, ?, ?)", row[0], row[1], nullablePrice(row[2]), nullablePrice(row[3]), nullablePrice(row[4]), row[5]); err != nil {
 			return err
 		}
 	}
@@ -198,20 +217,59 @@ CREATE TABLE prices (
 	return tx.Commit()
 }
 
-func decimal(s string) (string, error) {
+// Match PostgreSQL NUMERIC(16,4) and compare prices without floating-point rounding.
+func priceUnits(s string) (int64, error) {
 	if s == "" {
-		return "", fmt.Errorf("missing price")
+		return 0, fmt.Errorf("missing price")
 	}
 	for _, c := range s {
 		if (c < '0' || c > '9') && c != '.' {
-			return "", fmt.Errorf("invalid price")
+			return 0, fmt.Errorf("invalid price")
 		}
 	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil || f < 0 {
-		return "", fmt.Errorf("invalid price")
+	parts := strings.Split(s, ".")
+	if len(parts) > 2 || parts[0] == "" || len(strings.TrimLeft(parts[0], "0")) > 12 {
+		return 0, fmt.Errorf("invalid price: expected NUMERIC(16,4)")
 	}
-	return s, nil
+	fraction := ""
+	if len(parts) == 2 {
+		fraction = parts[1]
+		if fraction == "" || len(fraction) > 4 {
+			return 0, fmt.Errorf("invalid price: expected NUMERIC(16,4)")
+		}
+	}
+	units, err := strconv.ParseInt(strings.TrimLeft(parts[0], "0")+fraction+strings.Repeat("0", 4-len(fraction)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid price")
+	}
+	return units, nil
+}
+
+func nullablePrice(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// Values are open, high, low, close. Only close is required for legacy records.
+func validateOHLC(values []string) error {
+	var units [4]int64
+	for i, value := range values {
+		if value == "" && i < 3 {
+			continue
+		}
+		var err error
+		if units[i], err = priceUnits(value); err != nil {
+			return err
+		}
+	}
+	for _, pair := range [][2]int{{1, 2}, {1, 0}, {0, 2}, {1, 3}, {3, 2}} {
+		if values[pair[0]] != "" && values[pair[1]] != "" && units[pair[0]] < units[pair[1]] {
+			return fmt.Errorf("invalid OHLC price range")
+		}
+	}
+	return nil
 }
 
 func (s *Store) bind(query string) string {
@@ -262,7 +320,7 @@ func (s *Store) Query(ctx context.Context, q Query, now time.Time) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
-	query := "SELECT CAST(trading_date AS TEXT), CAST(close_price AS TEXT) FROM prices WHERE stock_code = ?"
+	query := "SELECT CAST(trading_date AS TEXT), CAST(open_price AS TEXT), CAST(high_price AS TEXT), CAST(low_price AS TEXT), CAST(close_price AS TEXT) FROM prices WHERE stock_code = ?"
 	args := []any{stock.Code}
 	switch q.Intent {
 	case "latest_close":
@@ -284,7 +342,7 @@ func (s *Store) Query(ctx context.Context, q Query, now time.Time) (Result, erro
 	defer rows.Close()
 	for rows.Next() {
 		var p Price
-		if err = rows.Scan(&p.Date, &p.Close); err != nil {
+		if err = rows.Scan(&p.Date, &p.Open, &p.High, &p.Low, &p.Close); err != nil {
 			return Result{}, err
 		}
 		out.Prices = append(out.Prices, p)

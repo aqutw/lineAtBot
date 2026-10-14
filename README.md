@@ -4,9 +4,10 @@ LINE 台股**歷史收盤價** demo：Go + Render Free + OpenRouter `openrouter/
 
 ## 資料與支援範圍
 
-- 預設使用 5 檔股票、30 筆**模擬**收盤價，只用於驗證串接；每則行情回覆都會標示 `DEMO 模擬資料・非真實行情`。
+- 預設使用 5 檔股票、30 筆**模擬**每日開盤、最高、最低、收盤價（OHLC），只用於驗證串接；每則行情回覆都會標示 `DEMO 模擬資料・非真實行情`。
 - 支援資料庫最新一筆、指定日期、最近 1–20 筆，以及最長 90 天區間（最多回傳 60 筆）。
 - 一次一檔；價格一律為收盤價。不提供成交量、盤中即時價格或投資建議。
+- 資料庫及 `/api/query` 的 `result.prices` 已包含 `open`、`high`、`low`、`close`；LINE 的自然語言查詢與文字回覆目前仍只提供收盤價。
 - 不下載行情。真實資料由使用者匯入。
 - 今天沒有資料時回覆「沒有已入庫的收盤行情」，不自動拿其他日期冒充。
 
@@ -63,15 +64,15 @@ curl http://localhost:10000/api/query \
 把自己的行情轉為下列 CSV，再提交並重新部署：
 
 - `data/stocks.csv`：`code,name`
-- `data/prices.csv`：`stock_code,trading_date,close_price`
+- `data/prices.csv`：`stock_code,trading_date,open_price,high_price,low_price,close_price`
 
-日期使用 `YYYY-MM-DD`；代碼保留為字串（例如 `0050`）；價格不用千分位逗號。
+日期使用 `YYYY-MM-DD`；代碼保留為字串（例如 `0050`）；價格不用千分位逗號，最多 12 位整數、4 位小數（`NUMERIC(16,4)`）。開盤、最高、最低價未知可留空，匯入後為 `NULL`，API 回傳 `null`；收盤價必填。已填價格須非負，且最高價不得低於開盤、最低、收盤價，最低價不得高於開盤或收盤價。Demo 的 OHLC 全是模擬值。
 
 SQLite 每次啟動從 CSV 重建，隨後以只讀模式開啟。Render Free 的本機檔案不持久；不可把唯一資料存入容器中的 DB。SQLite 模式仍會保留 DEMO 標示。
 
 ### 選項 B：切換 PostgreSQL
 
-1. 在你的 PostgreSQL 以 owner/importer 執行 `migrations/001_postgres.sql`。
+1. 在你的 PostgreSQL 以 owner/importer 執行 `migrations/001_postgres.sql` 及 `migrations/002_add_ohlc.sql`。既有收盤價資料庫必須在新版程式部署前執行 `002_add_ohlc.sql`，原紀錄的開盤／最高／最低價會保留為 `NULL`。
 2. 匯入自己準備的 `stocks`、`prices` 與選用的 `aliases`。
 3. 建立只能 SELECT 這三張表的 bot 帳號。
 4. 在 Render 設定該 bot 帳號的 `DATABASE_URL`，以及 `DATA_SOURCE_LABEL`。
@@ -82,6 +83,7 @@ Schema：
 stocks(code TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL)
 aliases(alias TEXT PRIMARY KEY, stock_code REFERENCES stocks(code))
 prices(stock_code REFERENCES stocks(code), trading_date DATE,
+       open_price NUMERIC(16,4), high_price NUMERIC(16,4), low_price NUMERIC(16,4),
        close_price NUMERIC(16,4), PRIMARY KEY(stock_code,trading_date))
 ```
 
@@ -89,7 +91,8 @@ prices(stock_code REFERENCES stocks(code), trading_date DATE,
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
-  -f migrations/001_postgres.sql -f scripts/import_postgres.sql
+  -f migrations/001_postgres.sql -f migrations/002_add_ohlc.sql \
+  -f scripts/import_postgres.sql
 ```
 
 匯入時需用 owner/importer 的 URL。內建 CSV 是模擬資料，匯入它們時請設定 `DATA_SOURCE_LABEL=DEMO 模擬資料（非真實行情）`。
@@ -128,6 +131,18 @@ LINE 尚未設定時服務也能啟動；`/healthz` 的 `line_configured=false` 
 5. 加 bot 好友並詢問「台積電最近五筆收盤價」。
 
 先送最終查價結果；不先消耗 reply token 發送「查詢中」。
+
+## 查看使用者提問
+
+每則簽章驗證成功、接受進佇列的 LINE 文字訊息會寫入應用程式 JSON 日誌，例如：
+
+```json
+{"time":"2026-10-14T13:00:00Z","level":"INFO","msg":"user_prompt","channel":"line","event_id":"example-event","prompt":"2330最新股價"}
+```
+
+在 Render Dashboard → `lineatbot` → **Logs** 搜尋 `user_prompt`，選擇所需時間範圍或 Live tail，即可查看原始提問。支援範圍外的提問也會記錄；同一事件重送會去重。只記錄文字訊息，不記錄 LINE user ID、reply token、Channel secret 或 API key。紀錄屬於 Render 應用程式日誌，沒有寫入行情資料庫。HTTP `/api/query` 的測試提問不會記錄。
+
+Render Hobby workspace 的日誌目前保留 7 天，超過期限需另行保存；參考 [Render Logs](https://render.com/docs/logging)。
 
 ## 限制與驗證
 

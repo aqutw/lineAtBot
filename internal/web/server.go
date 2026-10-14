@@ -155,6 +155,7 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 	for _, j := range jobs {
 		s.seen[eventID(j.event)] = now
 		s.queue <- j
+		s.Log.Info("user_prompt", "channel", "line", "event_id", eventID(j.event), "prompt", j.event.Message.Text)
 	}
 	s.mu.Unlock()
 	respond(w, 200, map[string]bool{"ok": true})

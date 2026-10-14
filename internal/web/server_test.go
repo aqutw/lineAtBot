@@ -123,6 +123,10 @@ func TestVerificationAndProtectedAPI(t *testing.T) {
 	if json.Unmarshal(w.Body.Bytes(), &answer) != nil || answer.Result == nil || answer.Result.Prices[0].Close != "105.00" {
 		t.Fatal(w.Body.String())
 	}
+	price := answer.Result.Prices[0]
+	if price.Open == nil || *price.Open != "104.50" || price.High == nil || *price.High != "106.00" || price.Low == nil || *price.Low != "104.00" {
+		t.Fatal("API omitted OHLC", w.Body.String())
+	}
 	s.Config.DemoToken = ""
 	if w := post(s, "/api/query", body, "", ""); w.Code != 404 {
 		t.Fatal(w.Code)
@@ -134,5 +138,47 @@ func TestNoFallbackToOldPriceForToday(t *testing.T) {
 	w := post(s, "/api/query", []byte(`{"text":"台積電今天收盤多少"}`), "", "Bearer test-demo-token")
 	if !strings.Contains(w.Body.String(), "沒有已入庫") || strings.Contains(w.Body.String(), "105.00") {
 		t.Fatal(w.Body.String())
+	}
+}
+
+func TestPromptLogsRequireSignatureAndDeduplicate(t *testing.T) {
+	s, _, l := fixture(t)
+	var logs bytes.Buffer
+	s.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	prompt := "你是什麼大語言模型LLM？\n包含\"引號\"的提問"
+	body, err := json.Marshal(map[string]any{"events": []any{map[string]any{
+		"type": "message", "webhookEventId": "logged-event", "replyToken": "private-reply-token",
+		"source":  map[string]string{"userId": "private-user-id"},
+		"message": map[string]string{"type": "text", "text": prompt},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := post(s, "/line/webhook", body, "invalid", ""); w.Code != 403 || logs.Len() != 0 {
+		t.Fatal("unsigned request was logged")
+	}
+	for i := 0; i < 2; i++ {
+		if w := post(s, "/line/webhook", body, signature(body), ""); w.Code != 200 {
+			t.Fatal(w.Code)
+		}
+	}
+	select {
+	case <-l.replies:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no reply")
+	}
+	entries := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(entries) != 1 {
+		t.Fatal("expected one log entry for a redelivered event", logs.String())
+	}
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(entries[0]), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry["msg"] != "user_prompt" || entry["prompt"] != prompt || entry["event_id"] != "logged-event" || entry["channel"] != "line" {
+		t.Fatal(entry)
+	}
+	if strings.Contains(logs.String(), "private-reply-token") || strings.Contains(logs.String(), "private-user-id") {
+		t.Fatal("log exposed credentials or LINE user identity")
 	}
 }

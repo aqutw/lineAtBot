@@ -10,7 +10,15 @@ CREATE TABLE IF NOT EXISTS aliases (
 CREATE TABLE IF NOT EXISTS prices (
     stock_code TEXT NOT NULL REFERENCES stocks(code),
     trading_date DATE NOT NULL,
+    open_price NUMERIC(16, 4) CHECK (open_price >= 0),
+    high_price NUMERIC(16, 4) CHECK (high_price >= 0),
+    low_price NUMERIC(16, 4) CHECK (low_price >= 0),
     close_price NUMERIC(16, 4) NOT NULL CHECK (close_price >= 0),
+    CONSTRAINT prices_ohlc_order CHECK (
+        high_price >= low_price AND
+        open_price <= high_price AND open_price >= low_price AND
+        close_price <= high_price AND close_price >= low_price
+    ),
     PRIMARY KEY (stock_code, trading_date)
 );
 -- Grant SELECT on these three tables to your dedicated bot user.

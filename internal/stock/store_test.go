@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/aqutw/lineAtBot/data"
@@ -87,5 +89,64 @@ func TestPostgresPlaceholders(t *testing.T) {
 	s := &Store{postgres: true}
 	if got := s.bind("WHERE stock_code = ? AND trading_date BETWEEN ? AND ? LIMIT ?"); got != "WHERE stock_code = $1 AND trading_date BETWEEN $2 AND $3 LIMIT $4" {
 		t.Fatal(got)
+	}
+}
+
+func TestDailyOHLCAndCloseOnlyRecords(t *testing.T) {
+	stocks, err := data.Snapshot.ReadFile("stocks.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prices, err := data.Snapshot.ReadFile("prices.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, values     string
+		wantErr, missing bool
+	}{
+		{"daily OHLC", "104.50,106.00,104.00,105.00", false, false},
+		{"missing historical OHLC", ",,,105.00", false, true},
+		{"high below close", "104.50,104.75,104.00,105.00", true, false},
+		{"low above open", "104.50,106.00,104.75,105.00", true, false},
+		{"high below low", "104.50,104.00,106.00,105.00", true, false},
+		{"negative price", "-1,106.00,104.00,105.00", true, false},
+		{"missing required close", "104.50,106.00,104.00,", true, false},
+		{"too much decimal precision", "104.50001,106.00,104.00,105.00", true, false},
+		{"too many integer digits", "1000000000000,106.00,104.00,105.00", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			files := fstest.MapFS{
+				"stocks.csv": &fstest.MapFile{Data: stocks},
+				"prices.csv": &fstest.MapFile{Data: []byte(strings.Replace(string(prices), "2330,2026-10-13,104.50,106.00,104.00,105.00", "2330,2026-10-13,"+test.values, 1))},
+			}
+			s, err := NewStore(context.Background(), files, "", "")
+			if test.wantErr {
+				if err == nil {
+					s.Close()
+					t.Fatal("invalid CSV was accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			out, err := s.Query(context.Background(), Query{Intent: "latest_close", Stock: "2330"}, testNow)
+			if err != nil || len(out.Prices) != 1 {
+				t.Fatalf("query: %+v %v", out, err)
+			}
+			p := out.Prices[0]
+			if p.Close != "105.00" {
+				t.Fatal(p)
+			}
+			if test.missing {
+				if p.Open != nil || p.High != nil || p.Low != nil {
+					t.Fatal("missing OHLC must not be fabricated", p)
+				}
+			} else if p.Open == nil || *p.Open != "104.50" || p.High == nil || *p.High != "106.00" || p.Low == nil || *p.Low != "104.00" {
+				t.Fatal("OHLC did not round-trip", p)
+			}
+		})
 	}
 }
