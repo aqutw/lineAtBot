@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: lineatbot
+    runtime: go
+    plan: free
+    region: singapore
+    buildCommand: go build -tags netgo -trimpath -ldflags="-s -w" -o bin/bot ./cmd/bot
+    startCommand: ./bin/bot
+    healthCheckPath: /healthz
+    envVars:
+      - key: GO_VERSION
+        value: "1.27.2"
+      - key: CGO_ENABLED
+        value: "1"
+      - key: OPENROUTER_MODEL
+        value: openrouter/free
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: DEMO_API_TOKEN
+        generateValue: true

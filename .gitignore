@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+/bin/
+*.db
+*.sqlite
+*.sqlite-*
+.DS_Store
+coverage.out
