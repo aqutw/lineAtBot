@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"github.com/aqutw/lineAtBot/data"
 	"github.com/aqutw/lineAtBot/internal/bot"
 	"github.com/aqutw/lineAtBot/internal/stock"
+	"github.com/aqutw/lineAtBot/internal/testfixture"
 )
 
 type fakeParser struct {
@@ -42,8 +44,11 @@ func (l *fakeLINE) Reply(_ context.Context, token, text string) error {
 	return nil
 }
 func fixture(t *testing.T) (*Server, *fakeParser, *fakeLINE) {
+	return fixtureWithData(t, testfixture.Snapshot)
+}
+func fixtureWithData(t *testing.T, files fs.FS) (*Server, *fakeParser, *fakeLINE) {
 	t.Helper()
-	db, err := stock.NewStore(context.Background(), data.Snapshot, "", "")
+	db, err := stock.NewStore(context.Background(), files, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,5 +185,21 @@ func TestPromptLogsRequireSignatureAndDeduplicate(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "private-reply-token") || strings.Contains(logs.String(), "private-user-id") {
 		t.Fatal("log exposed credentials or LINE user identity")
+	}
+}
+
+func TestImportedDataRepliesUseActualCSVAndNoDemoLabel(t *testing.T) {
+	s, _, l := fixtureWithData(t, data.Snapshot)
+	body := []byte(`{"events":[{"type":"message","webhookEventId":"imported-event","replyToken":"reply-imported","message":{"type":"text","text":"2330最新股價"}}]}`)
+	if w := post(s, "/line/webhook", body, signature(body), ""); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	select {
+	case got := <-l.replies:
+		if !strings.Contains(got.text, "2026-10-14｜收盤 2490 元") || !strings.Contains(got.text, "使用者匯入 CSV") || strings.Contains(got.text, "DEMO") || strings.Contains(got.text, "模擬") || strings.Contains(got.text, "非真實行情") {
+			t.Fatal(got.text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no imported-data reply")
 	}
 }

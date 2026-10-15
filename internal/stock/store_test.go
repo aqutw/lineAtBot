@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/aqutw/lineAtBot/data"
+	"github.com/aqutw/lineAtBot/internal/testfixture"
 )
 
 func demoStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := NewStore(context.Background(), data.Snapshot, "", "")
+	s, err := NewStore(context.Background(), testfixture.Snapshot, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,11 +94,11 @@ func TestPostgresPlaceholders(t *testing.T) {
 }
 
 func TestDailyOHLCAndCloseOnlyRecords(t *testing.T) {
-	stocks, err := data.Snapshot.ReadFile("stocks.csv")
+	stocks, err := testfixture.Snapshot.ReadFile("stocks.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
-	prices, err := data.Snapshot.ReadFile("prices.csv")
+	prices, err := testfixture.Snapshot.ReadFile("prices.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,8 +118,10 @@ func TestDailyOHLCAndCloseOnlyRecords(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			files := fstest.MapFS{
-				"stocks.csv": &fstest.MapFile{Data: stocks},
-				"prices.csv": &fstest.MapFile{Data: []byte(strings.Replace(string(prices), "2330,2026-10-13,104.50,106.00,104.00,105.00", "2330,2026-10-13,"+test.values, 1))},
+				"dataset.json": &fstest.MapFile{Data: []byte(`{"demo_data":true,"source":"test fixture"}`)},
+				"groups.csv":   &fstest.MapFile{Data: []byte("group_name,stock_code\n")},
+				"stocks.csv":   &fstest.MapFile{Data: stocks},
+				"prices.csv":   &fstest.MapFile{Data: []byte(strings.Replace(string(prices), "2330,2026-10-13,104.50,106.00,104.00,105.00", "2330,2026-10-13,"+test.values, 1))},
 			}
 			s, err := NewStore(context.Background(), files, "", "")
 			if test.wantErr {
@@ -148,5 +151,43 @@ func TestDailyOHLCAndCloseOnlyRecords(t *testing.T) {
 				t.Fatal("OHLC did not round-trip", p)
 			}
 		})
+	}
+}
+
+func TestImportedDatasetReplacesSimulatedData(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	s, err := NewStore(ctx, data.Snapshot, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	stats, err := s.Stats(ctx)
+	if err != nil || stats.Stocks != 200 || stats.Prices != 193541 || stats.LatestDate != "2026-10-14" {
+		t.Fatalf("imported stats: %+v %v", stats, err)
+	}
+	if s.Demo || s.Source != "使用者匯入 CSV（非即時行情）" {
+		t.Fatalf("imported data was marked as simulated: %+v", s)
+	}
+	var groups, members int
+	if err := s.db.QueryRowContext(ctx, "SELECT (SELECT COUNT(*) FROM stock_groups), COUNT(*) FROM stock_group_members").Scan(&groups, &members); err != nil || groups != 2 || members != 200 {
+		t.Fatalf("groups=%d members=%d err=%v", groups, members, err)
+	}
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, Taipei)
+	for _, test := range []struct{ code, name, open, high, low, close string }{
+		{"1471", "首利", "9.3", "9.3", "9.17", "9.27"},
+		{"2059", "川湖", "10155", "10295", "9950", "10005"},
+	} {
+		out, err := s.Query(ctx, Query{Intent: "latest_close", Stock: test.code}, now)
+		if err != nil || len(out.Prices) != 1 || out.Stock.Name != test.name || out.Demo {
+			t.Fatalf("imported query: %+v %v", out, err)
+		}
+		p := out.Prices[0]
+		if p.Date != "2026-10-14" || p.Close != test.close || p.Open == nil || *p.Open != test.open || p.High == nil || *p.High != test.high || p.Low == nil || *p.Low != test.low {
+			t.Fatalf("imported OHLC differs from CSV: %+v", p)
+		}
+	}
+	if _, err := s.Lookup(ctx, "0050"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("old demo-only stock survived replacement: %v", err)
 	}
 }

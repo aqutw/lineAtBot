@@ -21,7 +21,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	startCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	startCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	db, err := stock.NewStore(startCtx, data.Snapshot, os.Getenv("DATABASE_URL"), os.Getenv("DATA_SOURCE_LABEL"))
 	cancel()
 	if err != nil {

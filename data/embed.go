@@ -2,7 +2,7 @@ package data
 
 import "embed"
 
-// Snapshot contains explicitly simulated seed data, never real market quotes.
+// Snapshot contains the user-provided historical OHLC dataset and its provenance.
 //
-//go:embed *.csv
+//go:embed *.csv dataset.json
 var Snapshot embed.FS

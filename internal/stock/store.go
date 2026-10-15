@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -88,6 +90,17 @@ func NewStore(ctx context.Context, files fs.FS, databaseURL, source string) (*St
 		}
 		return s, nil
 	}
+	metadata, err := fs.ReadFile(files, "dataset.json")
+	if err != nil {
+		return nil, fmt.Errorf("dataset metadata missing")
+	}
+	var dataset struct {
+		Demo   *bool  `json:"demo_data"`
+		Source string `json:"source"`
+	}
+	if json.Unmarshal(metadata, &dataset) != nil || dataset.Demo == nil || strings.TrimSpace(dataset.Source) == "" {
+		return nil, fmt.Errorf("invalid dataset metadata")
+	}
 	f, err := os.CreateTemp("", "lineatbot-*.sqlite")
 	if err != nil {
 		return nil, err
@@ -102,7 +115,7 @@ func NewStore(ctx context.Context, files fs.FS, databaseURL, source string) (*St
 		os.Remove(path)
 		return nil, err
 	}
-	if err = seed(writeDB, files); err != nil {
+	if err = seed(ctx, writeDB, files); err != nil {
 		writeDB.Close()
 		os.Remove(path)
 		return nil, err
@@ -123,9 +136,9 @@ func NewStore(ctx context.Context, files fs.FS, databaseURL, source string) (*St
 		return nil, err
 	}
 	if source == "" {
-		source = "DEMO 模擬資料（非真實行情）"
+		source = dataset.Source
 	}
-	return &Store{db: db, path: path, Source: source, Demo: true}, nil
+	return &Store{db: db, path: path, Source: source, Demo: *dataset.Demo}, nil
 }
 
 func (s *Store) Close() error {
@@ -136,15 +149,21 @@ func (s *Store) Close() error {
 	return err
 }
 
-func seed(db *sql.DB, files fs.FS) error {
-	tx, err := db.Begin()
+func seed(ctx context.Context, db *sql.DB, files fs.FS) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`
+	_, err = tx.ExecContext(ctx, `
 CREATE TABLE stocks (code TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 CREATE TABLE aliases (alias TEXT PRIMARY KEY, stock_code TEXT NOT NULL REFERENCES stocks(code));
+CREATE TABLE stock_groups (name TEXT PRIMARY KEY);
+CREATE TABLE stock_group_members (
+ group_name TEXT NOT NULL REFERENCES stock_groups(name),
+ stock_code TEXT NOT NULL REFERENCES stocks(code),
+ PRIMARY KEY (group_name, stock_code)
+);
 CREATE TABLE prices (
  stock_code TEXT NOT NULL REFERENCES stocks(code), trading_date TEXT NOT NULL,
  open_price TEXT CHECK (CAST(open_price AS REAL) >= 0),
@@ -163,53 +182,87 @@ CREATE TABLE prices (
 	if err != nil {
 		return err
 	}
-	load := func(path string, header []string) ([][]string, error) {
+	load := func(path string, header []string, apply func([]string) error) error {
 		f, err := files.Open(path)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		defer f.Close()
 		r := csv.NewReader(f)
 		r.FieldsPerRecord = len(header)
-		rows, err := r.ReadAll()
-		if err != nil {
-			return nil, err
+		actualHeader, err := r.Read()
+		if err != nil || strings.Join(actualHeader, ",") != strings.Join(header, ",") {
+			return fmt.Errorf("invalid CSV header: %s", path)
 		}
-		if len(rows) < 2 || strings.Join(rows[0], ",") != strings.Join(header, ",") {
-			return nil, fmt.Errorf("invalid CSV header: %s", path)
+		for line := 2; ; line++ {
+			row, err := r.Read()
+			if err == io.EOF {
+				return nil
+			}
+			if err == nil {
+				err = apply(row)
+			}
+			if err != nil {
+				return fmt.Errorf("%s row %d: %w", path, line, err)
+			}
 		}
-		return rows[1:], nil
 	}
-	stocks, err := load("stocks.csv", []string{"code", "name"})
+	stockInsert, err := tx.PrepareContext(ctx, "INSERT INTO stocks VALUES (?, ?)")
 	if err != nil {
 		return err
 	}
-	for _, row := range stocks {
+	defer stockInsert.Close()
+	if err = load("stocks.csv", []string{"code", "name"}, func(row []string) error {
 		if strings.TrimSpace(row[0]) == "" || strings.TrimSpace(row[1]) == "" {
 			return fmt.Errorf("empty stock field")
 		}
-		if _, err = tx.Exec("INSERT INTO stocks VALUES (?, ?)", row[0], row[1]); err != nil {
-			return err
-		}
+		_, err := stockInsert.ExecContext(ctx, row[0], row[1])
+		return err
+	}); err != nil {
+		return err
 	}
-	prices, err := load("prices.csv", []string{"stock_code", "trading_date", "open_price", "high_price", "low_price", "close_price"})
+	priceInsert, err := tx.PrepareContext(ctx, "INSERT INTO prices (stock_code, trading_date, open_price, high_price, low_price, close_price) VALUES (?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
-	for _, row := range prices {
-		if _, err = time.Parse("2006-01-02", row[1]); err != nil {
+	defer priceInsert.Close()
+	if err = load("prices.csv", []string{"stock_code", "trading_date", "open_price", "high_price", "low_price", "close_price"}, func(row []string) error {
+		if _, err := time.Parse("2006-01-02", row[1]); err != nil {
 			return fmt.Errorf("invalid CSV date")
 		}
-		if err = validateOHLC(row[2:]); err != nil {
+		if err := validateOHLC(row[2:]); err != nil {
 			return err
 		}
-		if _, err = tx.Exec("INSERT INTO prices (stock_code, trading_date, open_price, high_price, low_price, close_price) VALUES (?, ?, ?, ?, ?, ?)", row[0], row[1], nullablePrice(row[2]), nullablePrice(row[3]), nullablePrice(row[4]), row[5]); err != nil {
+		_, err := priceInsert.ExecContext(ctx, row[0], row[1], nullablePrice(row[2]), nullablePrice(row[3]), nullablePrice(row[4]), row[5])
+		return err
+	}); err != nil {
+		return err
+	}
+	groupInsert, err := tx.PrepareContext(ctx, "INSERT OR IGNORE INTO stock_groups (name) VALUES (?)")
+	if err != nil {
+		return err
+	}
+	defer groupInsert.Close()
+	memberInsert, err := tx.PrepareContext(ctx, "INSERT INTO stock_group_members (group_name, stock_code) VALUES (?, ?)")
+	if err != nil {
+		return err
+	}
+	defer memberInsert.Close()
+	if err = load("groups.csv", []string{"group_name", "stock_code"}, func(row []string) error {
+		if strings.TrimSpace(row[0]) == "" || strings.TrimSpace(row[1]) == "" {
+			return fmt.Errorf("empty group field")
+		}
+		if _, err := groupInsert.ExecContext(ctx, row[0]); err != nil {
 			return err
 		}
+		_, err := memberInsert.ExecContext(ctx, row[0], row[1])
+		return err
+	}); err != nil {
+		return err
 	}
 	aliases := map[string]string{"台積": "2330", "tsmc": "2330", "富士康": "2317", "台灣50": "0050", "臺灣50": "0050", "元大50": "0050"}
 	for alias, code := range aliases {
-		_, err = tx.Exec("INSERT INTO aliases SELECT ?, code FROM stocks WHERE code = ?", alias, code)
+		_, err = tx.ExecContext(ctx, "INSERT INTO aliases SELECT ?, code FROM stocks WHERE code = ?", alias, code)
 		if err != nil {
 			return err
 		}

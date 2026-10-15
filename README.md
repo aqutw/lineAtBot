@@ -1,10 +1,12 @@
 # lineAtBot
 
-LINE 台股**歷史收盤價** demo：Go + Render Free + OpenRouter `openrouter/free` + SQL。
+LINE 台股**歷史收盤價**查詢：Go + Render Free + OpenRouter `openrouter/free` + SQL。
 
 ## 資料與支援範圍
 
-- 預設使用 5 檔股票、30 筆**模擬**每日開盤、最高、最低、收盤價（OHLC），只用於驗證串接；每則行情回覆都會標示 `DEMO 模擬資料・非真實行情`。
+- 預設使用使用者提供 CSV 的 **200 檔股票、193,541 筆**每日開盤、最高、最低、收盤價（OHLC），日期範圍 **2022-08-01～2026-10-14**。
+- 來源標示為 `使用者匯入 CSV（非即時行情）`，`demo_data=false`，查價回覆不顯示 Demo／模擬資料字樣。
+- 保存「上市半導體」「上市電子零組件」兩個分類、200 筆股票分類關聯；目前未開放自然語言分類篩選。
 - 支援資料庫最新一筆、指定日期、最近 1–20 筆，以及最長 90 天區間（最多回傳 60 筆）。
 - 一次一檔；價格一律為收盤價。不提供成交量、盤中即時價格或投資建議。
 - 資料庫及 `/api/query` 的 `result.prices` 已包含 `open`、`high`、`low`、`close`；LINE 的自然語言查詢與文字回覆目前仍只提供收盤價。
@@ -18,7 +20,7 @@ LINE Webhook → Go 驗證原始 body 簽章 → 快速回傳 HTTP 200
                   ↓ 本機驗證
          Go 固定 SQL + 綁定參數
                   ↓
-         SQLite demo 或 PostgreSQL
+         SQLite CSV snapshot 或 PostgreSQL
                   ↓
          Go 格式化 → LINE Reply API
 ```
@@ -43,7 +45,7 @@ export DEMO_API_TOKEN='your-random-test-token'
 
 | Endpoint | 用途 |
 | --- | --- |
-| `GET /healthz` | DB 狀態、模擬資料標示與 LINE/OpenRouter 是否已設定；不呼叫模型、不揭露密鑰 |
+| `GET /healthz` | DB 狀態、`demo_data` 與 LINE/OpenRouter 是否已設定；不呼叫模型、不揭露密鑰 |
 | `POST /line/webhook` | LINE 專用入口，必須驗證 `x-line-signature` |
 | `POST /api/query` | 受 Bearer token 保護的整合測試入口；未設定 `DEMO_API_TOKEN` 時回 404 |
 
@@ -55,26 +57,37 @@ curl http://localhost:10000/api/query \
   -d '{"text":"台積電最近五筆收盤價"}'
 ```
 
-`/api/query` 與 LINE 使用相同解析、驗證、SQL 與回覆邏輯。範例日期以模擬資料範圍為準。
+`/api/query` 與 LINE 使用相同解析、驗證、SQL 與回覆邏輯。範例日期以匯入資料範圍為準。
 
 ## 真實資料匯入
 
-### 選項 A：先維持 SQLite demo
+### 選項 A：目前使用 SQLite snapshot
+
+目前的 `data/` 已由使用者提供的 `*.d.csv` 和 `group_*_stock_name.mapping.csv` 轉換。更新資料時在本機執行：
+
+```bash
+python3 scripts/import_wantg.py \
+  --input-dir /path/to/wantg --output-dir data
+```
+
+工具只讀取來源檔，先驗證全部資料，再產出專案內的 CSV 與 `dataset.json`（包含來源檔 SHA-256、筆數、日期範圍及資料標記）。股票代碼來自檔名、名稱與分類來自 mapping CSV；不匯入 K、D。提交這些輸出並重新部署即可更新線上資料。
 
 把自己的行情轉為下列 CSV，再提交並重新部署：
 
 - `data/stocks.csv`：`code,name`
 - `data/prices.csv`：`stock_code,trading_date,open_price,high_price,low_price,close_price`
+- `data/groups.csv`：`group_name,stock_code`
+- `data/dataset.json`：資料來源及 `demo_data` 標記。SQLite 啟動時必須有有效 metadata。
 
-日期使用 `YYYY-MM-DD`；代碼保留為字串（例如 `0050`）；價格不用千分位逗號，最多 12 位整數、4 位小數（`NUMERIC(16,4)`）。開盤、最高、最低價未知可留空，匯入後為 `NULL`，API 回傳 `null`；收盤價必填。已填價格須非負，且最高價不得低於開盤、最低、收盤價，最低價不得高於開盤或收盤價。Demo 的 OHLC 全是模擬值。
+日期使用 `YYYY-MM-DD`；代碼保留為字串（例如 `0050`）；價格不用千分位逗號，最多 12 位整數、4 位小數（`NUMERIC(16,4)`）。開盤、最高、最低價未知可留空，匯入後為 `NULL`，API 回傳 `null`；收盤價必填。已填價格須非負，且最高價不得低於開盤、最低、收盤價，最低價不得高於開盤或收盤價。
 
-SQLite 每次啟動從 CSV 重建，隨後以只讀模式開啟。Render Free 的本機檔案不持久；不可把唯一資料存入容器中的 DB。SQLite 模式仍會保留 DEMO 標示。
+SQLite 每次啟動從嵌入執行檔的 CSV 重建，使用串流讀取與 prepared statements 匯入，隨後以只讀模式開啟。Render Free 的本機檔案不持久，但重新啟動會從同一份已提交資料重建。唯一來源仍應保存在自己的原始 CSV；目前資料標記不因使用 SQLite 而變成 Demo。
 
 ### 選項 B：切換 PostgreSQL
 
-1. 在你的 PostgreSQL 以 owner/importer 執行 `migrations/001_postgres.sql` 及 `migrations/002_add_ohlc.sql`。既有收盤價資料庫必須在新版程式部署前執行 `002_add_ohlc.sql`，原紀錄的開盤／最高／最低價會保留為 `NULL`。
-2. 匯入自己準備的 `stocks`、`prices` 與選用的 `aliases`。
-3. 建立只能 SELECT 這三張表的 bot 帳號。
+1. 在你的 PostgreSQL 以 owner/importer 執行 `migrations/001_postgres.sql`、`migrations/002_add_ohlc.sql` 及 `migrations/003_stock_groups.sql`。既有收盤價資料庫必須在新版程式部署前執行 `002_add_ohlc.sql`，原紀錄的開盤／最高／最低價會保留為 `NULL`。
+2. 匯入 `stocks`、`prices`、`stock_groups`、`stock_group_members` 與選用的 `aliases`。
+3. 建立只能 SELECT 資料表的 bot 帳號。
 4. 在 Render 設定該 bot 帳號的 `DATABASE_URL`，以及 `DATA_SOURCE_LABEL`。
 
 Schema：
@@ -82,6 +95,9 @@ Schema：
 ```text
 stocks(code TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL)
 aliases(alias TEXT PRIMARY KEY, stock_code REFERENCES stocks(code))
+stock_groups(name TEXT PRIMARY KEY)
+stock_group_members(group_name REFERENCES stock_groups(name),
+                    stock_code REFERENCES stocks(code), PRIMARY KEY(group_name,stock_code))
 prices(stock_code REFERENCES stocks(code), trading_date DATE,
        open_price NUMERIC(16,4), high_price NUMERIC(16,4), low_price NUMERIC(16,4),
        close_price NUMERIC(16,4), PRIMARY KEY(stock_code,trading_date))
@@ -92,10 +108,11 @@ prices(stock_code REFERENCES stocks(code), trading_date DATE,
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
   -f migrations/001_postgres.sql -f migrations/002_add_ohlc.sql \
+  -f migrations/003_stock_groups.sql \
   -f scripts/import_postgres.sql
 ```
 
-匯入時需用 owner/importer 的 URL。內建 CSV 是模擬資料，匯入它們時請設定 `DATA_SOURCE_LABEL=DEMO 模擬資料（非真實行情）`。
+匯入時需用 owner/importer 的 URL。匯入目前 CSV 時請設定 `DATA_SOURCE_LABEL=使用者匯入 CSV（非即時行情）`。PostgreSQL 匯入工具會新增或更新同一股票／日期，不會清除遠端資料庫的其他紀錄；目前線上服務仍使用完整替換後的 SQLite snapshot。
 
 外部 DB 連線預設 TLS `sslmode=require`、只讀交易、statement timeout 3 秒。程式不執行遠端 migration，也不會把資料庫中的股價傳給模型。
 
@@ -152,5 +169,6 @@ Render Hobby workspace 的日誌目前保留 7 天，超過期限需另行保存
 - 非同步佇列也是記憶體，程序重啟可能丟失已 ACK 的工作；這是單執行個體 demo，正式上線需持久化佇列/去重紀錄。
 - 不自動重試模型或 Reply API，避免多消耗免費額度或重複使用 token。
 - 本機測試覆蓋簽章、空事件驗證、重送去重、參數化查詢、只讀 DB、日期/筆數限制、無資料不回退、模型輸出驗證，以及受保護 API 的完整查價流程。測試使用模擬模型與 LINE，不消耗 API 額度。
+- 小型模擬行情僅保留在 `internal/testfixture/` 供測試使用，不會作為正式執行檔的資料集。另有完整匯入資料的筆數、分類、OHLC 對照與 Demo 標記測試。
 
 官方文件：[Render Free](https://render.com/docs/free)、[LINE Webhook](https://developers.line.biz/en/docs/messaging-api/building-bot/)、[OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs)。

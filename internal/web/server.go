@@ -58,7 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/query", s.query)
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		io.WriteString(w, `<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>lineAtBot</title><body><main><h1>lineAtBot</h1><p>台股收盤價查詢服務</p><p>此服務的預設資料為 DEMO 模擬資料，非真實行情。</p><a href="/healthz">查看服務狀態</a></main></body></html>`)
+		io.WriteString(w, `<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>lineAtBot</title><body><main><h1>lineAtBot</h1><p>台股收盤價查詢服務</p><p>查詢已入庫的歷史收盤價，資料來源以查詢回覆為準。</p><a href="/healthz">查看服務狀態</a></main></body></html>`)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
