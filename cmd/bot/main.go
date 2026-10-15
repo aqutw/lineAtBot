@@ -31,7 +31,7 @@ func main() {
 	defer db.Close()
 	model := openrouter.New(os.Getenv("OPENROUTER_API_KEY"), os.Getenv("OPENROUTER_MODEL"))
 	lineClient := line.New(os.Getenv("LINE_CHANNEL_ACCESS_TOKEN"))
-	service := &bot.Service{Store: db, Parser: model, Now: time.Now}
+	service := &bot.Service{Store: db, Model: model, Now: time.Now}
 	server := web.New(ctx, service, lineClient, web.Config{Secret: os.Getenv("LINE_CHANNEL_SECRET"),
 		LINEEnabled: os.Getenv("LINE_CHANNEL_SECRET") != "" && lineClient.Token != "", ModelEnabled: model.APIKey != "", DemoToken: os.Getenv("DEMO_API_TOKEN")}, logger)
 	port := os.Getenv("PORT")
@@ -39,7 +39,7 @@ func main() {
 		port = "10000"
 	}
 	httpServer := &http.Server{Addr: ":" + port, Handler: server.Handler(), ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 10 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 * 1024}
+		ReadTimeout: 10 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 * 1024}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

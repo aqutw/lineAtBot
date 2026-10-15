@@ -1,28 +1,27 @@
 # lineAtBot
 
-LINE 台股**歷史收盤價**查詢：Go + Render Free + OpenRouter `openrouter/free` + SQL。
+LINE 台股**歷史股價與自然語言對話**：Go + Render Free + OpenRouter `openrouter/free` + SQL。
 
 ## 資料與支援範圍
 
 - 預設使用使用者提供 CSV 的 **200 檔股票、193,541 筆**每日開盤、最高、最低、收盤價（OHLC），日期範圍 **2022-08-01～2026-10-14**。
 - 來源標示為 `使用者匯入 CSV（非即時行情）`，`demo_data=false`，查價回覆不顯示 Demo／模擬資料字樣。
-- 保存「上市半導體」「上市電子零組件」兩個分類、200 筆股票分類關聯；目前未開放自然語言分類篩選。
-- 支援資料庫最新一筆、指定日期、最近 1–20 筆，以及最長 90 天區間（最多回傳 60 筆）。
-- 一次一檔；價格一律為收盤價。不提供成交量、盤中即時價格或投資建議。
-- 資料庫及 `/api/query` 的 `result.prices` 已包含 `open`、`high`、`low`、`close`；LINE 的自然語言查詢與文字回覆目前仍只提供收盤價。
-- 不下載行情。真實資料由使用者匯入。
-- 今天沒有資料時回覆「沒有已入庫的收盤行情」，不自動拿其他日期冒充。
+- 保存「上市半導體」「上市電子零組件」兩個分類、200 筆股票分類關聯，可由 LLM 產生查詢。
+- LLM 自行決定是否查詢資料、查哪些股票／日期／OHLC，以及最終回答格式。支援多檔、多日期、開盤／最低／最高／收盤價、統計及一般對話。
+- 不再使用固定意圖清單、單檔限制或 Go 行情回覆模板；「說明」、模型身分及非股價問題也交給 LLM。
+- 目前每則訊息獨立處理，尚未加入每個使用者的短期對話記憶。
+- 不下載行情，股價來源為使用者匯入 CSV。Prompt 要求模型引用查詢結果與實際日期，空結果不得以別日行情冒充。
 
 ```text
-LINE Webhook → Go 驗證原始 body 簽章 → 快速回傳 HTTP 200
+LINE Webhook → Go 驗證簽章 → 快速回傳 HTTP 200
                   ↓ bounded queue
-         OpenRouter 解析查詢條件 JSON
-                  ↓ 本機驗證
-         Go 固定 SQL + 綁定參數
+       OpenRouter LLM：直接回答，或呼叫 SQL 工具
+                  ↓（需要資料時）
+       唯讀 SQL → SQLite / PostgreSQL → 查詢結果
                   ↓
-         SQLite CSV snapshot 或 PostgreSQL
+       OpenRouter LLM 自行撰寫最終回答
                   ↓
-         Go 格式化 → LINE Reply API
+       原文送到 LINE Reply API（長文只分段）
 ```
 
 ## 本機啟動
@@ -57,7 +56,9 @@ curl http://localhost:10000/api/query \
   -d '{"text":"台積電最近五筆收盤價"}'
 ```
 
-`/api/query` 與 LINE 使用相同解析、驗證、SQL 與回覆邏輯。範例日期以匯入資料範圍為準。
+`/api/query` 與 LINE 使用相同的 LLM／SQL 工具流程。回傳 `text` 是 LLM 的最終文字，`model` 是 OpenRouter 回傳的模型識別，`queries` 為本次工具結果。行情列建議使用 `stock_name / stock_id / date / open / low / high / close` 欄位。範例日期以匯入資料範圍為準。
+
+可測試：「台積電與聯發科在 2026/10/01、2026/10/02 的開高低收，用你覺得清楚的方式列出」、「你是什麼大語言模型？」或「幫我寫一首詩」。
 
 ## 真實資料匯入
 
@@ -114,7 +115,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
 
 匯入時需用 owner/importer 的 URL。匯入目前 CSV 時請設定 `DATA_SOURCE_LABEL=使用者匯入 CSV（非即時行情）`。PostgreSQL 匯入工具會新增或更新同一股票／日期，不會清除遠端資料庫的其他紀錄；目前線上服務仍使用完整替換後的 SQLite snapshot。
 
-外部 DB 連線預設 TLS `sslmode=require`、只讀交易、statement timeout 3 秒。程式不執行遠端 migration，也不會把資料庫中的股價傳給模型。
+外部 DB 連線預設 TLS `sslmode=require`、只讀交易、statement timeout 3 秒。程式不執行遠端 migration。LLM 會收到股票目錄、資料來源及工具查詢結果，以自行組織回答。
 
 ## Render Free 部署
 
@@ -163,12 +164,17 @@ Render Hobby workspace 的日誌目前保留 7 天，超過期限需另行保存
 
 ## 限制與驗證
 
-- 使用 JSON Schema 與 `provider.require_parameters=true`；free router 無可用支援端點時會回覆暫時無法解析。
-- 每個程序限制模型呼叫間隔約 3.1 秒，避免超過每分鐘 20 次；每日額度仍由 OpenRouter 控制。
+- OpenRouter 使用 function/tool calling 與 `provider.require_parameters=true`，自由路由器須有支援工具的免費模型；不強制最終回答為 JSON。
+- 每個 LLM API 呼叫（含工具後續回覆）至少間隔約 3.1 秒，以等待方式控制免費 RPM；不再用「查詢較密集」分支擋掉提問。
+- 一般對話通常 1 次模型請求；查庫通常 2 次，查詢修正最多 3 次，因此每日免費請求額度會較快消耗。
+- SQL 工具僅接受單一 SELECT/WITH，每次查詢 3 秒、最多 200 列／64 KiB；截斷狀態會交給模型。這些是工具資源保護，不是回覆意圖清單。
+- SQLite 以唯讀模式及 authorizer 限制在五張股票資料表，禁止寫入、ATTACH、PRAGMA、系統表與檔案／擴充函數；PostgreSQL 必須使用專用唯讀帳號，工具另開只讀交易。
+- 模型單次輸出預算為 4096 tokens。Go 保留最終文字，LINE 傳輸上按平台限制拆為最多 5 則、每則 5000 UTF-16 units，不套行情模板。
+- LINE 佇列工作有 52 秒處理預算，保留 8 秒給 Reply API；模型／網路／額度失敗仍需回傳服務錯誤訊息。
 - Webhook 重送去重保留 20 分鐘，狀態在記憶體；Render 重啟後不保留。Reply API 的 token 單次使用限制仍生效。
-- 非同步佇列也是記憶體，程序重啟可能丟失已 ACK 的工作；這是單執行個體 demo，正式上線需持久化佇列/去重紀錄。
-- 不自動重試模型或 Reply API，避免多消耗免費額度或重複使用 token。
-- 本機測試覆蓋簽章、空事件驗證、重送去重、參數化查詢、只讀 DB、日期/筆數限制、無資料不回退、模型輸出驗證，以及受保護 API 的完整查價流程。測試使用模擬模型與 LINE，不消耗 API 額度。
-- 小型模擬行情僅保留在 `internal/testfixture/` 供測試使用，不會作為正式執行檔的資料集。另有完整匯入資料的筆數、分類、OHLC 對照與 Demo 標記測試。
+- 非同步佇列也是記憶體，程序重啟可能丟失已 ACK 的工作；正式上線需持久化佇列／去重紀錄。
+- 不自動重試 HTTP 模型或 Reply API 請求；LLM 可以針對工具 SQL 錯誤修正查詢。
+- 測試覆蓋 LLM 原文轉送、一般問題／說明、多檔多日 OHLC、工具錯誤交回模型、SQL 保護、LINE 簽章／去重／長文分段，以及受保護 HTTP API。
+- 小型模擬行情僅保留在 `internal/testfixture/` 供測試使用，不會作為正式執行檔的資料集。完整匯入資料另有筆數、分類、OHLC 與資料標記測試。
 
-官方文件：[Render Free](https://render.com/docs/free)、[LINE Webhook](https://developers.line.biz/en/docs/messaging-api/building-bot/)、[OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs)。
+官方文件：[Render Free](https://render.com/docs/free)、[LINE Webhook](https://developers.line.biz/en/docs/messaging-api/building-bot/)、[OpenRouter tool calling](https://openrouter.ai/docs/guides/features/tool-calling)。

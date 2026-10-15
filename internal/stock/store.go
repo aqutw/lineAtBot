@@ -124,7 +124,7 @@ func NewStore(ctx context.Context, files fs.FS, databaseURL, source string) (*St
 		os.Remove(path)
 		return nil, err
 	}
-	db, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(path)+"?mode=ro&immutable=1&_query_only=true")
+	db, err := sql.Open("stock_readonly", "file:"+filepath.ToSlash(path)+"?mode=ro&immutable=1&_query_only=true")
 	if err != nil {
 		os.Remove(path)
 		return nil, err

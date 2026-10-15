@@ -19,21 +19,31 @@ import (
 
 	"github.com/aqutw/lineAtBot/data"
 	"github.com/aqutw/lineAtBot/internal/bot"
+	"github.com/aqutw/lineAtBot/internal/openrouter"
 	"github.com/aqutw/lineAtBot/internal/stock"
 	"github.com/aqutw/lineAtBot/internal/testfixture"
 )
 
-type fakeParser struct {
-	mu    sync.Mutex
-	calls int
-	q     stock.Query
+type fakeModel struct {
+	mu        sync.Mutex
+	calls     int
+	sql, text string
 }
 
-func (p *fakeParser) Parse(context.Context, string, time.Time) (stock.Query, error) {
+func (p *fakeModel) Complete(_ context.Context, messages []openrouter.Message, _ []openrouter.Tool, _ string) (openrouter.Completion, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
-	return p.q, nil
+	if messages[len(messages)-1].Role == "tool" || p.sql == "" {
+		return openrouter.Completion{Model: "test-model", Message: openrouter.Message{Role: "assistant", Content: p.text}}, nil
+	}
+	var call openrouter.ToolCall
+	call.ID = "test-query"
+	call.Type = "function"
+	call.Function.Name = "query_stock_database"
+	args, _ := json.Marshal(map[string]string{"sql": p.sql})
+	call.Function.Arguments = string(args)
+	return openrouter.Completion{Model: "test-model", Message: openrouter.Message{Role: "assistant", ToolCalls: []openrouter.ToolCall{call}}}, nil
 }
 
 type reply struct{ token, text string }
@@ -43,19 +53,19 @@ func (l *fakeLINE) Reply(_ context.Context, token, text string) error {
 	l.replies <- reply{token, text}
 	return nil
 }
-func fixture(t *testing.T) (*Server, *fakeParser, *fakeLINE) {
+func fixture(t *testing.T) (*Server, *fakeModel, *fakeLINE) {
 	return fixtureWithData(t, testfixture.Snapshot)
 }
-func fixtureWithData(t *testing.T, files fs.FS) (*Server, *fakeParser, *fakeLINE) {
+func fixtureWithData(t *testing.T, files fs.FS) (*Server, *fakeModel, *fakeLINE) {
 	t.Helper()
 	db, err := stock.NewStore(context.Background(), files, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &fakeParser{q: stock.Query{Intent: "latest_close", Stock: "2330", Limit: 1}}
+	p := &fakeModel{sql: "SELECT s.name AS stock_name, s.code AS stock_id, p.trading_date AS date, p.open_price AS open, p.low_price AS low, p.high_price AS high, p.close_price AS close FROM prices p JOIN stocks s ON s.code=p.stock_code WHERE s.code='2330' ORDER BY p.trading_date DESC LIMIT 1", text: "模型自己的原文：台積電收盤 105.00 元，來自模擬測試資料。"}
 	l := &fakeLINE{replies: make(chan reply, 20)}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := New(ctx, &bot.Service{Store: db, Parser: p, Now: func() time.Time { return time.Date(2026, 10, 14, 12, 0, 0, 0, stock.Taipei) }}, l,
+	s := New(ctx, &bot.Service{Store: db, Model: p, Now: func() time.Time { return time.Date(2026, 10, 14, 12, 0, 0, 0, stock.Taipei) }}, l,
 		Config{Secret: "test-secret", LINEEnabled: true, ModelEnabled: true, DemoToken: "test-demo-token"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { cancel(); s.Wait(); db.Close() })
 	return s, p, l
@@ -96,7 +106,7 @@ func TestSignedWebhookEndToEndAndRedelivery(t *testing.T) {
 	p.mu.Lock()
 	calls := p.calls
 	p.mu.Unlock()
-	if calls != 1 {
+	if calls != 2 {
 		t.Fatalf("redelivery called model %d times", calls)
 	}
 	select {
@@ -125,13 +135,17 @@ func TestVerificationAndProtectedAPI(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 	var answer bot.Answer
-	if json.Unmarshal(w.Body.Bytes(), &answer) != nil || answer.Result == nil || answer.Result.Prices[0].Close != "105.00" {
+	if json.Unmarshal(w.Body.Bytes(), &answer) != nil || len(answer.Queries) != 1 || len(answer.Queries[0].Rows) != 1 {
 		t.Fatal(w.Body.String())
 	}
-	price := answer.Result.Prices[0]
-	if price.Open == nil || *price.Open != "104.50" || price.High == nil || *price.High != "106.00" || price.Low == nil || *price.Low != "104.00" {
-		t.Fatal("API omitted OHLC", w.Body.String())
+	price := answer.Queries[0].Rows[0]
+	if price["close"] != "105.00" || price["open"] != "104.50" || price["high"] != "106.00" || price["low"] != "104.00" {
+		t.Fatal(w.Body.String())
 	}
+	if answer.Text != "模型自己的原文：台積電收盤 105.00 元，來自模擬測試資料。" {
+		t.Fatal(answer.Text)
+	}
+
 	s.Config.DemoToken = ""
 	if w := post(s, "/api/query", body, "", ""); w.Code != 404 {
 		t.Fatal(w.Code)
@@ -139,7 +153,8 @@ func TestVerificationAndProtectedAPI(t *testing.T) {
 }
 func TestNoFallbackToOldPriceForToday(t *testing.T) {
 	s, p, _ := fixture(t)
-	p.q = stock.Query{Intent: "price_on_date", Stock: "2330", Date: "2026-10-14", Limit: 1}
+	p.sql = "SELECT close_price AS close FROM prices WHERE stock_code='2330' AND trading_date='2026-10-14'"
+	p.text = "今天沒有已入庫行情，不以其他日期替代。"
 	w := post(s, "/api/query", []byte(`{"text":"台積電今天收盤多少"}`), "", "Bearer test-demo-token")
 	if !strings.Contains(w.Body.String(), "沒有已入庫") || strings.Contains(w.Body.String(), "105.00") {
 		t.Fatal(w.Body.String())
@@ -189,7 +204,8 @@ func TestPromptLogsRequireSignatureAndDeduplicate(t *testing.T) {
 }
 
 func TestImportedDataRepliesUseActualCSVAndNoDemoLabel(t *testing.T) {
-	s, _, l := fixtureWithData(t, data.Snapshot)
+	s, p, l := fixtureWithData(t, data.Snapshot)
+	p.text = "台積電（2330）2026-10-14｜收盤 2490 元。資料來源：使用者匯入 CSV（非即時行情）。"
 	body := []byte(`{"events":[{"type":"message","webhookEventId":"imported-event","replyToken":"reply-imported","message":{"type":"text","text":"2330最新股價"}}]}`)
 	if w := post(s, "/line/webhook", body, signature(body), ""); w.Code != 200 {
 		t.Fatal(w.Code)

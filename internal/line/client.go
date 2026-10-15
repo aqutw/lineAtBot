@@ -52,7 +52,11 @@ func (c *Client) Reply(ctx context.Context, replyToken, text string) error {
 	if c.Token == "" || replyToken == "" {
 		return fmt.Errorf("LINE credentials unavailable")
 	}
-	body, err := json.Marshal(map[string]any{"replyToken": replyToken, "messages": []map[string]string{{"type": "text", "text": text}}})
+	messages, err := splitMessages(text)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(map[string]any{"replyToken": replyToken, "messages": messages})
 	if err != nil {
 		return err
 	}
@@ -71,4 +75,30 @@ func (c *Client) Reply(ctx context.Context, replyToken, text string) error {
 		return fmt.Errorf("LINE reply HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// LINE permits up to five text messages of 5000 UTF-16 units per reply.
+// Preserve the model's text exactly; only split it for the transport limit.
+func splitMessages(text string) ([]map[string]string, error) {
+	if text == "" {
+		return nil, fmt.Errorf("LINE reply text is empty")
+	}
+	var out []map[string]string
+	start, units := 0, 0
+	for offset, r := range text {
+		width := 1
+		if r > 0xffff {
+			width = 2
+		}
+		if units+width > 5000 {
+			out = append(out, map[string]string{"type": "text", "text": text[start:offset]})
+			start, units = offset, 0
+		}
+		units += width
+	}
+	out = append(out, map[string]string{"type": "text", "text": text[start:]})
+	if len(out) > 5 {
+		return nil, fmt.Errorf("LINE reply exceeds five messages")
+	}
+	return out, nil
 }

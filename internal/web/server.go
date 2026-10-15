@@ -32,16 +32,15 @@ type job struct {
 	received time.Time
 }
 type Server struct {
-	Bot           *bot.Service
-	LINE          Replier
-	Config        Config
-	Log           *slog.Logger
-	ctx           context.Context
-	queue         chan job
-	mu            sync.Mutex
-	seen          map[string]time.Time
-	lastModelCall time.Time
-	wg            sync.WaitGroup
+	Bot    *bot.Service
+	LINE   Replier
+	Config Config
+	Log    *slog.Logger
+	ctx    context.Context
+	queue  chan job
+	mu     sync.Mutex
+	seen   map[string]time.Time
+	wg     sync.WaitGroup
 }
 
 func New(ctx context.Context, service *bot.Service, replier Replier, cfg Config, logger *slog.Logger) *Server {
@@ -81,7 +80,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, 200, map[string]any{"status": "ok", "database": stats, "demo_data": s.Bot.Store.Demo,
-		"line_configured": s.Config.LINEEnabled, "openrouter_configured": s.Config.ModelEnabled})
+		"line_configured": s.Config.LINEEnabled, "openrouter_configured": s.Config.ModelEnabled,
+		"response_mode": "llm_with_readonly_sql"})
 }
 func eventID(e line.Event) string {
 	if e.ID != "" {
@@ -160,21 +160,7 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	respond(w, 200, map[string]bool{"ok": true})
 }
-func (s *Server) allowModel() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now()
-	if now.Sub(s.lastModelCall) < 3100*time.Millisecond {
-		return false
-	}
-	s.lastModelCall = now
-	return true
-}
 func (s *Server) answer(ctx context.Context, text string) bot.Answer {
-	trimmed := strings.TrimSpace(text)
-	if trimmed != "help" && trimmed != "說明" && trimmed != "幫助" && trimmed != "使用說明" && !s.allowModel() {
-		return bot.Answer{Text: "查詢較密集，請隔幾秒後再試。"}
-	}
 	return s.Bot.Answer(ctx, text)
 }
 func (s *Server) run() {
@@ -184,16 +170,18 @@ func (s *Server) run() {
 		case <-s.ctx.Done():
 			return
 		case j := <-s.queue:
-			remaining := 40*time.Second - time.Since(j.received)
+			remaining := 52*time.Second - time.Since(j.received)
 			if remaining < 10*time.Second {
 				continue
 			}
-			ctx, cancel := context.WithTimeout(s.ctx, remaining)
+			ctx, cancel := context.WithTimeout(s.ctx, remaining-8*time.Second)
 			answer := s.answer(ctx, j.event.Message.Text)
-			if err := s.LINE.Reply(ctx, j.event.ReplyToken, answer.Text); err != nil {
+			cancel()
+			replyCtx, replyCancel := context.WithTimeout(s.ctx, 8*time.Second)
+			if err := s.LINE.Reply(replyCtx, j.event.ReplyToken, answer.Text); err != nil {
 				s.Log.Warn("LINE reply failed", "error", err.Error())
 			}
-			cancel()
+			replyCancel()
 		}
 	}
 }
@@ -211,7 +199,7 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Text string `json:"text"`
 	}
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024))
 	d.DisallowUnknownFields()
 	if d.Decode(&input) != nil {
 		respond(w, 400, map[string]string{"error": "invalid_json"})
@@ -222,11 +210,11 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 		respond(w, 400, map[string]string{"error": "invalid_json"})
 		return
 	}
-	if strings.TrimSpace(input.Text) == "" || len([]rune(input.Text)) > 500 {
-		respond(w, 400, map[string]string{"error": "text_required_max_500_characters"})
+	if strings.TrimSpace(input.Text) == "" || len([]rune(input.Text)) > 5000 {
+		respond(w, 400, map[string]string{"error": "text_required_max_5000_characters"})
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
 	defer cancel()
 	respond(w, 200, s.answer(ctx, input.Text))
 }
