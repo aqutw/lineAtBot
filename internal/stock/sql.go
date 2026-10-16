@@ -32,7 +32,7 @@ func authorizeStockRead(action int, arg1, arg2, database string) int {
 			return sqlite3.SQLITE_DENY
 		}
 		switch arg1 {
-		case "stocks", "prices", "aliases", "stock_groups", "stock_group_members":
+		case "stocks", "prices", "price_history", "aliases", "stock_groups", "stock_group_members":
 			return sqlite3.SQLITE_OK
 		}
 	case sqlite3.SQLITE_FUNCTION:

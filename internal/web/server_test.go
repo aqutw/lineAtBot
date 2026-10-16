@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -118,6 +119,64 @@ func TestSignedWebhookEndToEndAndRedelivery(t *testing.T) {
 	changed := append([]byte(" "), body...)
 	if w := post(s, "/line/webhook", changed, signature(body), ""); w.Code != 403 {
 		t.Fatal(w.Code)
+	}
+}
+
+func TestSignedWebhookRepairsLeakedToolMarkupThroughRealAPIClient(t *testing.T) {
+	s, _, line := fixture(t)
+	var calls atomic.Int32
+	final := "台積電（2330）在測試資料中有 6 筆歷史股價。"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			Messages   []openrouter.Message `json:"messages"`
+			ToolChoice string               `json:"tool_choice"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+		}
+		message := openrouter.Message{Role: "assistant"}
+		reason := "stop"
+		switch calls.Add(1) {
+		case 1:
+			message.Content = `<dots_function_call><invoke name="query_stock_database"><parameter name="sql">DELETE FROM prices</parameter></invoke></dots_function_call>`
+		case 2:
+			if !strings.Contains(input.Messages[len(input.Messages)-1].Content, "正式 tool_calls") {
+				t.Error("missing repair feedback")
+			}
+			var call openrouter.ToolCall
+			call.ID, call.Type, call.Function.Name = "actual-query", "function", "query_stock_database"
+			call.Function.Arguments = `{"sql":"SELECT COUNT(*) AS n FROM price_history WHERE stock_code='2330'"}`
+			message.ToolCalls, reason = []openrouter.ToolCall{call}, "tool_calls"
+		case 3:
+			last := input.Messages[len(input.Messages)-1]
+			if input.ToolChoice != "none" || last.Role != "tool" || !strings.Contains(last.Content, `"n":6`) {
+				t.Error("missing query evidence", input)
+			}
+			message.Content = final
+		default:
+			t.Error("exceeded LLM budget")
+		}
+		json.NewEncoder(w).Encode(map[string]any{"model": "mock-free-model", "choices": []any{map[string]any{"finish_reason": reason, "message": message}}})
+	}))
+	defer upstream.Close()
+	client := openrouter.New("test-key", "openrouter/free")
+	client.URL = upstream.URL
+	s.Bot.Model = client
+	body := []byte(`{"events":[{"type":"message","webhookEventId":"protocol-test","replyToken":"reply-protocol","message":{"type":"text","text":"2330有幾筆資料？"}}]}`)
+	if w := post(s, "/line/webhook", body, signature(body), ""); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	select {
+	case got := <-line.replies:
+		if got.text != final || got.token != "reply-protocol" || calls.Load() != 3 {
+			t.Fatal(got, calls.Load())
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("no repaired reply")
+	}
+	stats, err := s.Bot.Store.Stats(context.Background())
+	if err != nil || stats.Prices != 30 {
+		t.Fatal("textual DELETE was executed", stats, err)
 	}
 }
 func TestVerificationAndProtectedAPI(t *testing.T) {

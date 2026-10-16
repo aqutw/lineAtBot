@@ -81,7 +81,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	respond(w, 200, map[string]any{"status": "ok", "database": stats, "demo_data": s.Bot.Store.Demo,
 		"line_configured": s.Config.LINEEnabled, "openrouter_configured": s.Config.ModelEnabled,
-		"response_mode": "llm_with_readonly_sql"})
+		"response_mode": "llm_with_readonly_sql", "tool_protocol_guard": "v1", "llm_recovery": "v1"})
 }
 func eventID(e line.Event) string {
 	if e.ID != "" {
@@ -170,20 +170,40 @@ func (s *Server) run() {
 		case <-s.ctx.Done():
 			return
 		case j := <-s.queue:
-			remaining := 52*time.Second - time.Since(j.received)
-			if remaining < 10*time.Second {
-				continue
-			}
-			ctx, cancel := context.WithTimeout(s.ctx, remaining-8*time.Second)
-			answer := s.answer(ctx, j.event.Message.Text)
-			cancel()
-			replyCtx, replyCancel := context.WithTimeout(s.ctx, 8*time.Second)
-			if err := s.LINE.Reply(replyCtx, j.event.ReplyToken, answer.Text); err != nil {
-				s.Log.Warn("LINE reply failed", "error", err.Error())
-			}
-			replyCancel()
+			s.process(j)
 		}
 	}
+}
+
+func (s *Server) process(j job) {
+	deadline := j.received.Add(52 * time.Second)
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		s.Log.Warn("line_job_expired", "event_id", eventID(j.event))
+		return
+	}
+	text := "目前服務忙碌，這次查詢尚未處理，請稍後重新傳送。"
+	if remaining > 10*time.Second {
+		ctx, cancel := context.WithDeadline(bot.WithRequestID(s.ctx, eventID(j.event)), deadline.Add(-8*time.Second))
+		text = s.answer(ctx, j.event.Message.Text).Text
+		cancel()
+	} else {
+		s.Log.Warn("line_job_busy", "event_id", eventID(j.event))
+	}
+	// A fresh context preserves error replies after the model budget expires,
+	// while this absolute deadline also includes any time already spent queued.
+	replyCtx, cancel := context.WithDeadline(s.ctx, minTime(deadline, time.Now().Add(8*time.Second)))
+	defer cancel()
+	if err := s.LINE.Reply(replyCtx, j.event.ReplyToken, text); err != nil {
+		s.Log.Warn("LINE reply failed", "event_id", eventID(j.event), "error", err.Error())
+	}
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }
 func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 	if s.Config.DemoToken == "" {

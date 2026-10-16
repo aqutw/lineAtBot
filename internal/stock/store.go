@@ -178,7 +178,12 @@ CREATE TABLE prices (
   (low_price IS NULL OR CAST(close_price AS REAL) >= CAST(low_price AS REAL))
  ),
  PRIMARY KEY (stock_code, trading_date)
-);`)
+);
+CREATE VIEW price_history AS
+ SELECT stock_code, trading_date,
+ CAST(open_price AS REAL) AS open_price, CAST(high_price AS REAL) AS high_price,
+ CAST(low_price AS REAL) AS low_price, CAST(close_price AS REAL) AS close_price
+ FROM prices;`)
 	if err != nil {
 		return err
 	}

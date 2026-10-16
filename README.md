@@ -10,6 +10,11 @@ LINE 台股**歷史股價與自然語言對話**：Go + Render Free + OpenRouter
 - LLM 自行決定是否查詢資料、查哪些股票／日期／OHLC，以及最終回答格式。支援多檔、多日期、開盤／最低／最高／收盤價、統計及一般對話。
 - 不再使用固定意圖清單、單檔限制或 Go 行情回覆模板；「說明」、模型身分及非股價問題也交給 LLM。
 - 目前每則訊息獨立處理，尚未加入每個使用者的短期對話記憶。
+- 工具呼叫只接受 API 正式 `tool_calls`；模型將 XML／工具標記寫入回答時不傳給 LINE，也不執行其中 SQL。協定或內容不完整最多修正一次，每則問題仍最多三次 LLM 呼叫；失敗時告知此次查詢未完成。已嘗試過的相同 SQL 不重複執行。
+- SQLite 提供 `price_history` 數值檢視（與 `prices` 同欄位），模型優先使用它做價格排序、比較、統計和 LAG／LEAD；原始十進位字串仍保存在 `prices`。
+- 模型流程共用 44 秒預算（包含查詢、限速等待及重試），單次模型呼叫最多 35 秒；可查詢的輪次會優先預留 12 秒供最終回答使用。LINE 從 webhook 收到訊息起總共最多 52 秒，包含排隊，另保留最多 8 秒發送回覆。
+- 分別處理上游限流、逾時、認證、額度／預算、權限、參數與回應格式錯誤。429 僅代表限流，不能據此宣稱每日免費額度用完。連 HTTP 200 中的 `error` 也會分類。
+- 快速 408／502／503／504 最多重試一次；429 必須有 `Retry-After` 才考慮重試。等待後至少還須有 15 秒預算，所有嘗試仍計入最多三次模型呼叫。認證／參數錯誤及本機取消不盲目重試。
 - 不下載行情，股價來源為使用者匯入 CSV。Prompt 要求模型引用查詢結果與實際日期，空結果不得以別日行情冒充。
 
 ```text
@@ -21,7 +26,7 @@ LINE Webhook → Go 驗證簽章 → 快速回傳 HTTP 200
                   ↓
        OpenRouter LLM 自行撰寫最終回答
                   ↓
-       原文送到 LINE Reply API（長文只分段）
+       協定檢查通過的原文送到 LINE Reply API（長文只分段）
 ```
 
 ## 本機啟動
@@ -57,6 +62,10 @@ curl http://localhost:10000/api/query \
 ```
 
 `/api/query` 與 LINE 使用相同的 LLM／SQL 工具流程。回傳 `text` 是 LLM 的最終文字，`model` 是 OpenRouter 回傳的模型識別，`queries` 為本次工具結果。行情列建議使用 `stock_name / stock_id / date / open / low / high / close` 欄位。範例日期以匯入資料範圍為準。
+
+Render Logs 可搜尋 `llm_completion`（實際模型、finish reason、工具數、耗時）、`llm_protocol_rejected`（協定錯誤原因）、`llm_tool_result`（查詢狀態）及 `llm_answer_ready`。同一次執行以 `run_id` 串聯，這些診斷不記錄原始模型輸出、SQL、密鑰或 LINE token。既有 `user_prompt` 提問紀錄保留。`/healthz` 的 `tool_protocol_guard=v1` 可確認新版已啟用。
+
+`llm_completion` 在 API 失敗時另外記錄 `http_status`、`upstream_code`、`upstream_error_type`、供應商／模型／request ID（上游有提供時）、`retry_after_ms` 與 `timeout_source`；不記錄 upstream 原始錯誤訊息或 raw body。LINE 的 `event_id` 可與 `user_prompt` 對照。`llm_retry` 記錄重試等待；`line_job_busy`／`line_job_expired` 區分排隊忙碌及期限已過。`/healthz` 的 `llm_recovery=v1` 是本次部署識別。遇到回歸可在 Render Deploys 回滾前一部署；舊版沒有本次詳細錯誤分類。
 
 可測試：「台積電與聯發科在 2026/10/01、2026/10/02 的開高低收，用你覺得清楚的方式列出」、「你是什麼大語言模型？」或「幫我寫一首詩」。
 

@@ -31,7 +31,7 @@ func main() {
 	defer db.Close()
 	model := openrouter.New(os.Getenv("OPENROUTER_API_KEY"), os.Getenv("OPENROUTER_MODEL"))
 	lineClient := line.New(os.Getenv("LINE_CHANNEL_ACCESS_TOKEN"))
-	service := &bot.Service{Store: db, Model: model, Now: time.Now}
+	service := &bot.Service{Store: db, Model: model, Now: time.Now, Log: logger}
 	server := web.New(ctx, service, lineClient, web.Config{Secret: os.Getenv("LINE_CHANNEL_SECRET"),
 		LINEEnabled: os.Getenv("LINE_CHANNEL_SECRET") != "" && lineClient.Token != "", ModelEnabled: model.APIKey != "", DemoToken: os.Getenv("DEMO_API_TOKEN")}, logger)
 	port := os.Getenv("PORT")
