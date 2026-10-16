@@ -84,7 +84,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	respond(w, 200, map[string]any{"status": "ok", "database": stats, "demo_data": s.Bot.Store.Demo,
 		"line_configured": s.Config.LINEEnabled, "openrouter_configured": s.Config.ModelEnabled,
-		"response_mode": "llm_with_readonly_sql", "tool_protocol_guard": "v1", "llm_recovery": "v1", "loading_indicator": "v1"})
+		"response_mode": "llm_with_readonly_sql", "tool_protocol_guard": "v1", "llm_recovery": "v1", "loading_indicator": "v1", "failure_details": "v1"})
 }
 func eventID(e line.Event) string {
 	if e.ID != "" {

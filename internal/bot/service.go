@@ -83,6 +83,7 @@ func (s *Service) Answer(ctx context.Context, text string) Answer {
 	log := s.logger().With("run_id", newRunID(), "event_id", requestID(ctx))
 	repairs := 0
 	retries := 0
+	var failedCalls []error
 	seenSQL := make(map[string]bool)
 	for turn := 0; turn < 3; turn++ {
 		choice := "auto"
@@ -99,15 +100,19 @@ func (s *Service) Answer(ctx context.Context, text string) Answer {
 			delay, retryable := openrouter.RetryDelay(err)
 			if retries == 0 && turn < 2 && retryable && remaining(ctx) > delay+minRetryBudget && ctx.Err() == nil {
 				retries++
+				failedCalls = append(failedCalls, err)
 				log.Info("llm_retry", "turn", turn+1, "delay_ms", delay.Milliseconds(), "error_code", modelErrorCode(err))
 				if waitErr := waitForRetry(ctx, delay); waitErr != nil {
-					answer.Text = modelFailureReply(waitErr)
+					answer.Text = modelFailureReply(waitErr, failedCalls...)
 					return answer
 				}
 				continue
 			}
-			answer.Text = modelFailureReply(err)
+			answer.Text = modelFailureReply(err, failedCalls...)
 			return answer
+		}
+		if len(completion.FailedAttempts) > 0 {
+			failedCalls = append(failedCalls, &openrouter.APIError{Attempts: completion.FailedAttempts})
 		}
 		answer.Model = completion.Model
 		if len(completion.Message.ToolCalls) == 0 {

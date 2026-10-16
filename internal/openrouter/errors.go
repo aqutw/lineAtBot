@@ -39,6 +39,7 @@ type APIError struct {
 	Model         string
 	RetryAfter    time.Duration
 	TimeoutSource string
+	Attempts      []Attempt
 	Cause         error
 }
 

@@ -35,10 +35,11 @@ type Tool struct {
 	} `json:"function"`
 }
 type Completion struct {
-	Message      Message
-	Model        string
-	FinishReason string
-	RequestID    string
+	Message        Message
+	Model          string
+	FinishReason   string
+	RequestID      string
+	FailedAttempts []Attempt
 }
 
 // Space all completions, including tool follow-ups, within the free RPM budget.
@@ -88,6 +89,7 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool,
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Title", "lineAtBot")
+	req.Header.Set("X-OpenRouter-Metadata", "enabled")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return Completion{}, transportError(ctx, err)
@@ -101,17 +103,30 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool,
 		return Completion{}, failure
 	}
 	var result struct {
-		Error   *wireError `json:"error"`
-		Model   string     `json:"model"`
-		ID      string     `json:"id"`
-		Choices []struct {
-			Message      Message `json:"message"`
-			FinishReason string  `json:"finish_reason"`
+		Error    *wireError      `json:"error"`
+		Model    string          `json:"model"`
+		Provider string          `json:"provider"`
+		Routing  json.RawMessage `json:"openrouter_metadata"`
+		ID       string          `json:"id"`
+		Choices  []struct {
+			Message      Message    `json:"message"`
+			FinishReason string     `json:"finish_reason"`
+			Error        *wireError `json:"error"`
 		} `json:"choices"`
 	}
 	decodeErr := json.Unmarshal(bodyBytes, &result)
+	if result.Error == nil && len(result.Choices) > 0 {
+		result.Error = result.Choices[0].Error
+	}
 	if resp.StatusCode != http.StatusOK || (decodeErr == nil && result.Error != nil) {
 		failure := responseError(resp.StatusCode, resp.Header, result.Error)
+		if failure.Model == "" {
+			failure.Model = safeID(result.Model)
+		}
+		if failure.Provider == "" {
+			failure.Provider = safeID(result.Provider)
+		}
+		failure.Attempts = routingAttempts(result.Routing)
 		if failure.RequestID == "" {
 			failure.RequestID = safeID(result.ID)
 		}
@@ -125,7 +140,7 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool,
 		return Completion{}, &APIError{Kind: InvalidResponse, HTTPStatus: resp.StatusCode, RequestID: safeID(result.ID), Model: safeID(result.Model), Cause: ErrUnavailable}
 	}
 	first.Message.Role = "assistant"
-	return Completion{Message: first.Message, Model: safeID(result.Model), FinishReason: first.FinishReason, RequestID: safeID(result.ID)}, nil
+	return Completion{Message: first.Message, Model: safeID(result.Model), FinishReason: first.FinishReason, RequestID: safeID(result.ID), FailedAttempts: routingAttempts(result.Routing)}, nil
 }
 
 func transportError(ctx context.Context, err error) *APIError {

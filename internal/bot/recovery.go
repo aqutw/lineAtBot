@@ -30,12 +30,14 @@ func callBudget(ctx context.Context, choice string) time.Duration {
 	return min(budget, openrouter.MaxCallTimeout)
 }
 
-func modelFailureReply(err error) string {
+func modelFailureSummary(err error) string {
 	switch openrouter.KindOf(err) {
 	case openrouter.RateLimited:
 		return "目前模型服務或供應商正在限流，請稍後再試。這不一定代表每日免費額度已用完。"
-	case openrouter.Timeout, openrouter.Cancelled:
+	case openrouter.Timeout:
 		return "這次模型回覆等待逾時，查詢未完成，請稍後再試。"
+	case openrouter.Cancelled:
+		return "這次模型請求已中止，查詢未完成，請稍後再試。"
 	case openrouter.Authentication, openrouter.Configuration:
 		return "目前模型服務的連線設定或認證異常，需要管理員檢查。"
 	case openrouter.Billing:
@@ -54,11 +56,15 @@ func modelFailureReply(err error) string {
 func logCompletion(log *slog.Logger, c openrouter.Completion, err error, turn int, elapsed time.Duration) {
 	attrs := []any{"turn", turn, "model", c.Model, "request_id", c.RequestID, "finish_reason", c.FinishReason,
 		"tool_calls", len(c.Message.ToolCalls), "latency_ms", elapsed.Milliseconds(), "error_code", modelErrorCode(err)}
+	if len(c.FailedAttempts) > 0 {
+		attrs = append(attrs, "failed_attempts", openrouter.FailureAttempts(&openrouter.APIError{Attempts: c.FailedAttempts}))
+	}
 	var api *openrouter.APIError
 	if errors.As(err, &api) {
 		attrs = append(attrs, "http_status", api.HTTPStatus, "upstream_code", api.Code, "upstream_error_type", api.ErrorType,
 			"upstream_request_id", api.RequestID, "provider", api.Provider, "upstream_model", api.Model,
 			"retry_after_ms", api.RetryAfter.Milliseconds(), "timeout_source", api.TimeoutSource)
+		attrs = append(attrs, "failed_attempts", openrouter.FailureAttempts(err))
 	}
 	log.Info("llm_completion", attrs...)
 }
