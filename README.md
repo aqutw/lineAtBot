@@ -157,7 +157,9 @@ LINE 尚未設定時服務也能啟動；`/healthz` 的 `line_configured=false` 
 4. 按 Verify，啟用 Use webhook、Webhook redelivery，關閉預設自動回覆。
 5. 加 bot 好友並詢問「台積電最近五筆收盤價」。
 
-先送最終查價結果；不先消耗 reply token 發送「查詢中」。
+一對一文字訊息開始處理時，先顯示 LINE 原生載入動畫，再用 Reply API 傳送最終回答。動畫最長 60 秒，回答抵達便自動消失，不消耗 reply token，也不發送 Push 訊息。動畫呼叫最多等待 1 秒，失敗仍繼續查詢；Webhook ACK 不等待動畫或模型。佇列中的訊息會等到開始處理才顯示動畫。
+
+動畫只支援一對一聊天，且使用者當時必須開著該聊天室；群組、多人聊天室或稍後才開啟聊天都不會看到動畫。Render 休眠時，需等服務喚醒、開始處理才會出現。參考 [LINE 載入動畫](https://developers.line.biz/en/docs/messaging-api/use-loading-indicator/)。
 
 ## 查看使用者提問
 

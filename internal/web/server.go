@@ -21,6 +21,9 @@ import (
 type Replier interface {
 	Reply(context.Context, string, string) error
 }
+type loadingIndicator interface {
+	ShowLoading(context.Context, string, int) error
+}
 type Config struct {
 	Secret       string
 	LINEEnabled  bool
@@ -81,7 +84,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	respond(w, 200, map[string]any{"status": "ok", "database": stats, "demo_data": s.Bot.Store.Demo,
 		"line_configured": s.Config.LINEEnabled, "openrouter_configured": s.Config.ModelEnabled,
-		"response_mode": "llm_with_readonly_sql", "tool_protocol_guard": "v1", "llm_recovery": "v1"})
+		"response_mode": "llm_with_readonly_sql", "tool_protocol_guard": "v1", "llm_recovery": "v1", "loading_indicator": "v1"})
 }
 func eventID(e line.Event) string {
 	if e.ID != "" {
@@ -185,6 +188,7 @@ func (s *Server) process(j job) {
 	text := "目前服務忙碌，這次查詢尚未處理，請稍後重新傳送。"
 	if remaining > 10*time.Second {
 		ctx, cancel := context.WithDeadline(bot.WithRequestID(s.ctx, eventID(j.event)), deadline.Add(-8*time.Second))
+		s.showLoading(ctx, j.event)
 		text = s.answer(ctx, j.event.Message.Text).Text
 		cancel()
 	} else {
@@ -196,6 +200,21 @@ func (s *Server) process(j job) {
 	defer cancel()
 	if err := s.LINE.Reply(replyCtx, j.event.ReplyToken, text); err != nil {
 		s.Log.Warn("LINE reply failed", "event_id", eventID(j.event), "error", err.Error())
+	}
+}
+
+func (s *Server) showLoading(ctx context.Context, e line.Event) {
+	indicator, ok := s.LINE.(loadingIndicator)
+	// Group events can contain userId too: only animate an explicit user chat.
+	if !ok || e.Source.Type != "user" || e.Source.UserID == "" || e.Source.GroupID != "" || e.Source.RoomID != "" {
+		return
+	}
+	// Keep the webhook ACK independent of LINE and cap this optional call so
+	// an animation outage cannot use up the model/reply budget. Do not retry.
+	loadingCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := indicator.ShowLoading(loadingCtx, e.Source.UserID, 60); err != nil {
+		s.Log.Warn("line_loading_failed", "event_id", eventID(e), "error", err.Error())
 	}
 }
 

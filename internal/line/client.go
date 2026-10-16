@@ -30,6 +30,7 @@ type Event struct {
 	ReplyToken string `json:"replyToken"`
 	ID         string `json:"webhookEventId"`
 	Source     struct {
+		Type    string `json:"type"`
 		UserID  string `json:"userId"`
 		GroupID string `json:"groupId"`
 		RoomID  string `json:"roomId"`
@@ -40,13 +41,45 @@ type Event struct {
 	} `json:"message"`
 }
 type Client struct {
-	HTTP  *http.Client
-	Token string
-	URL   string
+	HTTP       *http.Client
+	Token      string
+	URL        string
+	LoadingURL string
 }
 
 func New(token string) *Client {
-	return &Client{HTTP: &http.Client{Timeout: 8 * time.Second}, Token: token, URL: "https://api.line.me/v2/bot/message/reply"}
+	return &Client{HTTP: &http.Client{Timeout: 8 * time.Second}, Token: token,
+		URL: "https://api.line.me/v2/bot/message/reply", LoadingURL: "https://api.line.me/v2/bot/chat/loading/start"}
+}
+
+// ShowLoading uses a user ID, never a reply token. LINE clears the animation
+// when the final message arrives; this endpoint does not send a text message.
+func (c *Client) ShowLoading(ctx context.Context, userID string, seconds int) error {
+	if c.Token == "" || userID == "" {
+		return fmt.Errorf("LINE loading credentials unavailable")
+	}
+	if seconds < 5 || seconds > 60 || seconds%5 != 0 {
+		return fmt.Errorf("LINE loading duration invalid")
+	}
+	body, err := json.Marshal(map[string]any{"chatId": userID, "loadingSeconds": seconds})
+	if err != nil {
+		return fmt.Errorf("LINE loading encoding failed")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.LoadingURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("LINE loading request invalid")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("LINE loading transport failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("LINE loading HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 func (c *Client) Reply(ctx context.Context, replyToken, text string) error {
 	if c.Token == "" || replyToken == "" {
