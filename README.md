@@ -2,6 +2,16 @@
 
 LINE 台股**歷史股價與自然語言對話**：Golang API + LLM API + Database(SQLite / PostgreSQL)。
 
+## Before:
+
+![Google AI 摘要查詢景碩最近 200 天最低股價的回覆](screenshot-hallucination.png)
+
+![Google AI 查詢景碩指定期間最低股價的另一則回覆](screenshot-hallucination2.jpg)
+
+## After:
+
+![LINE Bot 依匯入資料庫查詢景碩最低股價，並回覆查無股票的情況](screenshot-bot.jpg)
+
 ## 資料與支援範圍
 
 - 預設使用使用者提供 CSV 的 **200 檔股票、193,541 筆**每日開盤、最高、最低、收盤價（OHLC），日期範圍 **2022-08-01～2026-10-14**。
