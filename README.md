@@ -1,6 +1,6 @@
-# lineAtBot
+# 查詢台股歷史股價
 
-LINE 台股**歷史股價與自然語言對話**：Go + Render Free + OpenRouter `openrouter/free` + SQL。
+LINE 台股**歷史股價與自然語言對話**：Golang API + LLM API + Database(SQLite / PostgreSQL)。
 
 ## 資料與支援範圍
 
@@ -22,11 +22,11 @@ LINE 台股**歷史股價與自然語言對話**：Go + Render Free + OpenRouter
 ```text
 LINE Webhook → Go 驗證簽章 → 快速回傳 HTTP 200
                   ↓ bounded queue
-       OpenRouter LLM：直接回答，或呼叫 SQL 工具
+       LLM：直接回答，或呼叫 SQL 工具
                   ↓（需要資料時）
        唯讀 SQL → SQLite / PostgreSQL → 查詢結果
                   ↓
-       OpenRouter LLM 自行撰寫最終回答
+       LLM 自行撰寫最終回答
                   ↓
        協定檢查通過的原文送到 LINE Reply API（長文只分段）
 ```
